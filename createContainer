@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-
 import argparse
 import contextlib
 import datetime
@@ -15,7 +14,6 @@ from enum import Enum
 from functools import wraps
 
 
-APPEND_HOSTS = r'append_hosts'
 SUB_DIRS = {"log": "log", "src": "src"}
 DEFAULT_CMD = r'tail -f /dev/null'
 DEFAULT_HOME = {"deployer": r"/home/shinto/host",
@@ -37,6 +35,7 @@ class Project(Enum):
 class Shell(Enum):
     bash = 1
     zsh = 2
+    sh = 3
 
 
 class ImageRepoId(object):
@@ -136,6 +135,18 @@ def create_image_container(client, image_id, cmd=DEFAULT_CMD):
 
 
 @DockerClient
+def check_shell(client, container_id):
+    container = client.containers.get(container_id)
+    if not inspect_file_exist(
+       container, r"/bin/{0}".format(argument.shell)):
+        for s in Shell:
+            if inspect_file_exist(
+               container, r"/bin/{0}".format(str(s.name))):
+                argument.shell = str(s.name)
+                break
+
+
+@DockerClient
 def rewrite_uid_gid(client, container_id, working_dir):
 
     container = client.containers.get(container_id)
@@ -176,12 +187,12 @@ def rewrite_uid_gid(client, container_id, working_dir):
             fd.write(fed_dict[file_type])
 
     def get_file(loc):
-        try:
-            fd, _ = container.get_archive(loc)
+        fd = inspect_file_exist(container, loc)
+        if fd:
             return fd
-        except:
-            print("File {0} does not exist in container.".format(loc))
-            raise
+        else:
+            raise Exception(
+                "File {0} does not exist in container.".format(loc))
 
     def untar(fd_file):
         ta = TarArchive('r', fd_file[0].read())
@@ -231,7 +242,17 @@ def create_container(client, image_id, working_dir):
         "privileged": argument.privileged,
     }
 
-    containerCollection.create(image=image_id, cmd=argument.cmd, **kargs)
+    return containerCollection.create(
+        image=image_id, command=argument.cmd, **kargs)
+
+
+@DockerClient
+def inspect_file_exist(client, container, loc):
+    try:
+        fd, _ = container.get_archive(loc)
+        return fd
+    except:
+        return None
 
 
 def generate_container_name(image_id):
@@ -255,7 +276,7 @@ def create_working_dir():
         return make_sub
 
     if argument.workdir is None:
-        workdir = tempfile.mkdtemp(dir=".")
+        workdir = tempfile.mkdtemp(dir=os.getcwd())
     else:
         workdir = os.path.join(argument.workdir)
 
@@ -264,27 +285,39 @@ def create_working_dir():
 
 
 @contextlib.contextmanager
-def start_container():
+def start():
     working_dir = create_working_dir()
     image_id = get_image_id()
     container = create_image_container(image_id)
     container_short_id = container.short_id
+    check_shell(container_short_id)
 
     try:
         rewrite_uid_gid(container_short_id, working_dir)
     finally:
         container.remove(force=True)
 
-    container_id = create_container(image_id, working_dir)
+    container = create_container(image_id, working_dir)
+    container.start()
 
-    yield container_id
+    yield container.short_id, working_dir
 
 
 def run():
     opt_parser()
 
-    with start_container() as container_id:
-        print(container_id)
+    with start() as result:
+        print("Access container: \"docker exec -it {ID} {CMD}\"".format(
+            ID=result[0], CMD="/bin/{SHELL}".format(SHELL=argument.shell)))
+        print("Stop container: \"docker stop {ID}\"".format(
+            ID=result[0]))
+        print("Remove container: \"docker rm {ID}\"".format(
+            ID=result[0]))
+        print("List containers: \"docker ps -a\"")
+        print("Stop all containers: \"docker stop $(docker ps -a -q)\"")
+        print("Remove all containers: \"docker rm $(docker ps -a -q)\"")
+        print("Log dir: {LOG}".format(LOG=os.path.join(result[1], "log")))
+        print("Src dir: {SRC}".format(SRC=os.path.join(result[1], "src")))
 
 
 def opt_parser():
