@@ -1,0 +1,381 @@
+#!/usr/bin/env python
+
+import argparse
+import contextlib
+import datetime
+import docker
+import io
+import os
+import re
+import sys
+import tarfile
+import tempfile
+
+from enum import Enum
+from functools import wraps
+
+
+APPEND_HOSTS = r'append_hosts'
+SUB_DIRS = {"log": "log", "src": "src"}
+DEFAULT_CMD = r'tail -f /dev/null'
+DEFAULT_HOME = {"deployer": r"/home/shinto/host",
+                "general_project": r"/home/{user}"}
+DEFAULT_NO_PROXY_HOSTS = r'localhost,127.0.0.1'
+PASSWD_FORMAT = r"{user}:x:{uid}:{gid}::{home}:/bin/{shell}"
+GROUP_FORMAT = r"{group}:x:{gid}:"
+PASSWD_REGEX = r":{UID}:{GID}:"
+GROUP_REGEX = r":{GID}:"
+
+
+class Project(Enum):
+    deployer = 1
+    higgs_deployer = 2
+    racdb_deployer = 3
+    general_project = 99
+
+
+class Shell(Enum):
+    bash = 1
+    zsh = 2
+
+
+class ImageRepoId(object):
+    def __init__(self, project):
+        self.__project = project
+
+    @property
+    def repoid(self):
+        regex_dict = \
+            {Project.deployer: r"busybox",
+             Project.higgs_deployer: "",
+             Project.racdb_deployer: "",
+             Project.general_project: r"busybox"}
+        return regex_dict[self.__project]
+
+
+class TarArchive(object):
+    def __init__(self, mode, data=None):
+        self.file = io.BytesIO(data)
+        self.tar = tarfile.open(mode=mode, fileobj=self.file)
+
+    def add_text_file(self, filename, text, encoding='utf-8'):
+        """Add the contents of `text` to a new entry in the `tar`
+        file.
+        :return: self
+        """
+        b = text.encode(encoding)
+        f = io.BytesIO(b)
+        info = tarfile.TarInfo(filename)
+        info.size = len(b)
+        info.type = tarfile.REGTYPE
+
+        self.tar.addfile(info, fileobj=f)
+        return self
+
+    def get_text_file(self, filename, encoding='utf-8'):
+        """Read the contents of a file in the archive.
+        :return: contents of file in string.
+        """
+        return self.tar.extractfile(filename).read().decode(encoding)
+
+    def close(self):
+        self.tar.close()
+        return self
+
+    @property
+    def buffer(self):
+        return self.file.getvalue()
+
+
+class DockerClient(object):
+    CLIENT = None
+
+    def __init__(self, func):
+        if not self.CLIENT:
+            self.CLIENT = docker.from_env(timeout=3)
+
+        @wraps(func)
+        def __wrapper(*args, **kargs):
+            return func(self.CLIENT, *args, **kargs)
+        self.__func = __wrapper
+
+    def __call__(self, *args, **kargs):
+        return self.__func(*args, **kargs)
+
+
+@DockerClient
+def get_image_id(client):
+    if argument.image_id:
+        return argument.image_id
+
+    project_type = Project[argument.project]
+    image_repo_id = ImageRepoId(project_type)
+    images = client.images.list(name=image_repo_id.repoid)
+
+    for i in images:
+        if len(i.tags) == 1:
+            return i.short_id.split(":")[-1]
+
+        for t in i.tags:
+            # Get the latest tagged image
+            if "latest" == t.split(":")[-1]:
+                return i.short_id.split(":")[-1]
+
+
+@DockerClient
+def create_image_container(client, image_id, cmd=DEFAULT_CMD):
+    """
+    :return: docker.models.containers.Container
+             Which has short_id property.
+    """
+    c_name = generate_container_name(image_id)
+    containerCollection = client.containers
+    created_container = containerCollection.create(
+        image_id, command=cmd, name=c_name)
+    return created_container
+
+
+@DockerClient
+def rewrite_uid_gid(client, container_id, working_dir):
+
+    container = client.containers.get(container_id)
+    keys = ("passwd", "group")
+    passwd_loc = os.path.join(working_dir, 'passwd')
+    group_loc = os.path.join(working_dir, 'group')
+    file_loc_dict = dict(zip(keys, (passwd_loc, group_loc)))
+
+    container_passwd_loc = os.path.join(r"/etc/passwd")
+    container_group_loc = os.path.join(r"/etc/group")
+
+    passwd_regex_fed = PASSWD_REGEX.format(UID=argument.uid, GID=argument.gid)
+    group_regex_fed = GROUP_REGEX.format(GID=argument.gid)
+    regex_dict = dict(zip(keys, (passwd_regex_fed, group_regex_fed)))
+
+    passwd_fed = PASSWD_FORMAT.format(
+        user=argument.username,
+        uid=argument.uid,
+        gid=argument.gid,
+        home=argument.home,
+        shell=argument.shell)
+    group_fed = GROUP_FORMAT.format(
+        group=argument.group,
+        gid=argument.gid)
+    fed_dict = dict(zip(keys, (passwd_fed, group_fed)))
+
+    username_dict = dict(zip(keys, (argument.username, argument.group)))
+
+    def rewrite(result_file):
+        result = result_file[0]
+        file_type = result_file[1]
+        with open(file_loc_dict[file_type], "w") as fd:
+            for ln in result.splitlines(True):
+                if re.search(regex_dict[file_type], ln) or \
+                   username_dict[file_type] in ln:
+                    continue
+                fd.write(ln)
+            fd.write(fed_dict[file_type])
+
+    def get_file(loc):
+        try:
+            fd, _ = container.get_archive(loc)
+            return fd
+        except:
+            print("File {0} does not exist in container.".format(loc))
+            raise
+
+    def untar(fd_file):
+        ta = TarArchive('r', fd_file[0].read())
+        try:
+            return ta.get_text_file(fd_file[1])
+        finally:
+            ta.close()
+
+    map(rewrite,
+        zip(map(untar,
+                zip(map(get_file,
+                        (container_passwd_loc, container_group_loc)),
+                    keys)),
+            keys))
+
+
+@DockerClient
+def create_container(client, image_id, working_dir):
+    containerCollection = client.containers
+
+    environment = {
+        "C_FORCE_ROOT": argument.force_root,
+        "no_proxy": argument.noproxy_host}
+
+    volumes_bind = {
+        os.path.join(working_dir, "log"): {
+            'bind': r'/var/log/deployer',
+            'mode': 'rw'},
+        os.path.join(working_dir, "src"): {
+            'bind': r'/home/shinto/deployer',
+            'mode': 'rw'},
+        os.path.join(working_dir): {
+            'bind': r'/home/shinto/host',
+            'mode': 'rw'},
+        os.path.join(working_dir, "passwd"): {
+            'bind': r'/etc/passwd',
+            'mode': 'ro'},
+        os.path.join(working_dir, "group"): {
+            'bind': r'/etc/group',
+            'mode': 'ro'},
+    }
+
+    kargs = {
+        "user": "0:0",
+        "environment": environment,
+        "volumes": volumes_bind,
+        "privileged": argument.privileged,
+    }
+
+    containerCollection.create(image=image_id, cmd=argument.cmd, **kargs)
+
+
+def generate_container_name(image_id):
+    return image_id + "_" + \
+        (argument.cname if argument.cname is not None
+         else str(datetime.datetime.now().strftime("%y%b%d%H%M%S")))
+
+
+def create_working_dir():
+    """
+    Create temporary working directory ./tmpxxx/ under current path
+    if workdir not provided.
+    """
+
+    def create_sub_dir(base_dir):
+        def make_sub(sub_dir):
+            try:
+                os.makedirs(os.path.join(base_dir, sub_dir))
+            except:
+                pass
+        return make_sub
+
+    if argument.workdir is None:
+        workdir = tempfile.mkdtemp(dir=".")
+    else:
+        workdir = os.path.join(argument.workdir)
+
+    map(create_sub_dir(workdir), SUB_DIRS.values())
+    return workdir
+
+
+@contextlib.contextmanager
+def start_container():
+    working_dir = create_working_dir()
+    image_id = get_image_id()
+    container = create_image_container(image_id)
+    container_short_id = container.short_id
+
+    try:
+        rewrite_uid_gid(container_short_id, working_dir)
+    finally:
+        container.remove(force=True)
+
+    container_id = create_container(image_id, working_dir)
+
+    yield container_id
+
+
+def run():
+    opt_parser()
+
+    with start_container() as container_id:
+        print(container_id)
+
+
+def opt_parser():
+    parser = argparse.ArgumentParser(
+        description='{0} argument parser'.format(sys.argv[0]),
+        epilog="Docker container creating script.")
+
+    parser.add_argument('--cmd', metavar='command to run in container.',
+                        type=str, default=DEFAULT_CMD,
+                        dest='cmd',
+                        help='command to run in container.')
+
+    parser.add_argument('--cname', metavar='container name.', type=str,
+                        default=None,
+                        dest='cname',
+                        help='container name')
+
+    parser.add_argument('--gid', metavar='gid', type=int,
+                        default=os.getgid(),
+                        dest='gid',
+                        help='GID to run in the container.')
+
+    parser.add_argument('--group', metavar='group name', type=str,
+                        default=r'deployer',
+                        dest='group',
+                        help='group in container.')
+
+    parser.add_argument('--home', metavar='home dir', type=str,
+                        default=DEFAULT_HOME['deployer'],
+                        dest='home',
+                        help='home dir in container.')
+
+    parser.add_argument('--image', metavar='docker image id.',
+                        type=str,
+                        dest='image_id',
+                        default=None,
+                        help='docker image\n'
+                             'Default: get from images list regex')
+
+    parser.add_argument('--no_proxy_host', metavar='no proxy host',
+                        type=str, default=DEFAULT_NO_PROXY_HOSTS,
+                        dest='noproxy_host',
+                        help='hosts that won\'t go with proxy.')
+
+    parser.add_argument('--privileged',
+                        action='store_false',
+                        dest='privileged',
+                        help='docker run in privileged mode')
+
+    parser.add_argument('--project', metavar='run as in which project.',
+                        type=str, default=Project.deployer.name,
+                        choices=[str(p.name) for p in Project],
+                        dest='project',
+                        help='project type')
+
+    parser.add_argument('--proxy', metavar='proxy url',
+                        type=str, default=None,
+                        dest='proxy',
+                        help='proxy url.')
+
+    parser.add_argument('--root',
+                        action='store_true',
+                        default=True,
+                        dest='force_root',
+                        help='C_FORCE_ROOT set')
+
+    parser.add_argument('--shell', metavar='default shell.',
+                        type=str, default=Shell.bash.name,
+                        choices=[str(s.name) for s in Shell],
+                        dest='shell',
+                        help='default shell')
+
+    parser.add_argument('--user', metavar='user name', type=str,
+                        default=r'deployer',
+                        dest='username',
+                        help='username in container.')
+
+    parser.add_argument('--uid', metavar='uid', type=int,
+                        default=os.getuid(),
+                        dest='uid',
+                        help='UID to run in the container.')
+
+    parser.add_argument('--workdir', metavar='work dir',
+                        type=str,
+                        default=None,
+                        dest='workdir',
+                        help='working directory.')
+
+    global argument
+    argument = parser.parse_args()
+
+
+if __name__ == "__main__":
+    run()
