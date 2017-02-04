@@ -10,46 +10,145 @@ import sys
 import tarfile
 import tempfile
 
-from enum import Enum
 from functools import wraps
 
 
+PROJECTS = ("deployer", "higgs_deployer", "racdb_deployer", "general")
+HOME = (
+    r"/home/shinto/host",
+    r"/home/shinto/host",
+    r"/home/shinto/host",
+    r"/home/{USER}")
+SHELL = ("bash", "bash", "bash", "zsh")
+SRC = (
+    "compute-konrad-deployer/deployer",
+    "higgs-gateway-appliance-deployer/deployer",
+    "compute-rac-db-deployer/deployer",
+    "")
+IMAGE_REPOSITORY = (
+    "duh",
+    "duh",
+    "duh",
+    "busybox")
+
+SHELL_TYPE = {"bash": r"/bin/bash", "zsh": r"/bin/zsh", "sh": r"/bin/sh"}
 SUB_DIRS = {"log": "log", "src": "src"}
 DEFAULT_CMD = r'tail -f /dev/null'
-DEFAULT_HOME = {"deployer": r"/home/shinto/host",
-                "general_project": r"/home/{user}"}
 DEFAULT_NO_PROXY_HOSTS = r'localhost,127.0.0.1'
-PASSWD_FORMAT = r"{user}:x:{uid}:{gid}::{home}:/bin/{shell}"
+PASSWD_FORMAT = r"{user}:x:{uid}:{gid}::{home}:{shell}"
 GROUP_FORMAT = r"{group}:x:{gid}:"
 PASSWD_REGEX = r":{UID}:{GID}:"
 GROUP_REGEX = r":{GID}:"
 
 
-class Project(Enum):
-    deployer = 1
-    higgs_deployer = 2
-    racdb_deployer = 3
-    general_project = 99
+class Project(object):
+    HOME = dict(zip(PROJECTS, HOME))
+    SHELL = dict(zip(PROJECTS, map(lambda key: SHELL_TYPE[key], SHELL)))
+    SRC = dict(zip(PROJECTS, SRC))
+    IMAGE_REPOSITORY = dict(zip(PROJECTS, IMAGE_REPOSITORY))
 
-
-class Shell(Enum):
-    bash = 1
-    zsh = 2
-    sh = 3
-
-
-class ImageRepoId(object):
-    def __init__(self, project):
+    def __init__(self, argument=None, project=PROJECTS[0]):
         self.__project = project
+        self.__argument = argument
+        self.__image_id = self.__argument.image_id
+
+        # check src path exist
+        self.__src = os.path.join(self.basesrc, self.SRC[self.project])
+
+        if not os.path.isdir(self.__src):
+            print("Warning: source path: {0} doesn't exist.".format(
+                self.__src))
+            self.__src = os.path.join(self.working_dir, "src")
+            print("Using {0} as source path.".format(self.__src))
 
     @property
-    def repoid(self):
-        regex_dict = \
-            {Project.deployer: r"busybox",
-             Project.higgs_deployer: "",
-             Project.racdb_deployer: "",
-             Project.general_project: r"busybox"}
-        return regex_dict[self.__project]
+    def basesrc(self):
+        return self.__argument.basesrc
+
+    @property
+    def cmd(self):
+        return self.__argument.cmd
+
+    @property
+    def cname(self):
+        return self.__argument.cname
+
+    @property
+    def force_root(self):
+        return self.__argument.force_root
+
+    @property
+    def gid(self):
+        return self.__argument.gid
+
+    @property
+    def group(self):
+        return self.__argument.group
+
+    @property
+    def home(self):
+        home = self.HOME[self.project]
+
+        if self.project == "general":
+            return home.format(USER=self.user)
+
+        return home
+
+    @property
+    def image_id(self):
+        return self.__image_id
+
+    @image_id.setter
+    def image_id(self, value):
+        self.__image_id = value
+
+    @property
+    def image_repository(self):
+        return self.IMAGE_REPOSITORY[self.project]
+
+    @property
+    def image_tag(self):
+        return self.__argument.tag
+
+    @property
+    def noproxy_host(self):
+        return self.__argument.noproxy_host
+
+    @property
+    def privileged(self):
+        return self.__argument.privileged
+
+    @property
+    def project(self):
+        return self.__project
+
+    @property
+    def shell(self):
+        return self.SHELL[self.project]
+
+    @shell.setter
+    def shell(self, value):
+        self.SHELL[self.project] = value
+
+    @property
+    def src(self):
+        return self.__src
+
+    @property
+    def uid(self):
+        return self.__argument.uid
+
+    @property
+    def user(self):
+        return self.__argument.username
+
+    @property
+    def working_dir(self):
+        return self.__argument.workdir
+
+    @working_dir.setter
+    def working_dir(self, value):
+        self.__argument.workdir = value
 
 
 class TarArchive(object):
@@ -104,29 +203,27 @@ class DockerClient(object):
 
 @DockerClient
 def get_image_id(client):
-    if argument.image_id:
-        return argument.image_id
-
-    project_type = Project[argument.project]
-    image_repo_id = ImageRepoId(project_type)
-    images = client.images.list(name=image_repo_id.repoid)
+    images = client.images.list()
 
     for i in images:
-        if len(i.tags) == 1:
-            return i.short_id.split(":")[-1]
-
         for t in i.tags:
-            # Get the latest tagged image
-            if "latest" == t.split(":")[-1]:
-                return i.short_id.split(":")[-1]
+            if project.image_repository in t:
+                if project.image_tag == t.split(":")[-1]:
+                    project.image_id = i.short_id.split(":")[-1]
+                    return
+
+    raise Exception("No image found match. {0}:{1}".format(
+        project.image_repository, project.image_tag))
 
 
 @DockerClient
-def create_image_container(client, image_id, cmd=DEFAULT_CMD):
+def create_image_container(client):
     """
     :return: docker.models.containers.Container
              Which has short_id property.
     """
+    cmd = project.cmd
+    image_id = project.image_id
     c_name = generate_container_name(image_id)
     containerCollection = client.containers
     created_container = containerCollection.create(
@@ -137,19 +234,19 @@ def create_image_container(client, image_id, cmd=DEFAULT_CMD):
 @DockerClient
 def check_shell(client, container_id):
     container = client.containers.get(container_id)
-    if not inspect_file_exist(
-       container, r"/bin/{0}".format(argument.shell)):
-        for s in Shell:
-            if inspect_file_exist(
-               container, r"/bin/{0}".format(str(s.name))):
-                argument.shell = str(s.name)
+
+    if not inspect_file_exist(container, project.shell):
+        for s in SHELL_TYPE.values():
+            if inspect_file_exist(container, s):
+                project.shell = s
                 break
 
 
 @DockerClient
-def rewrite_uid_gid(client, container_id, working_dir):
-
+def rewrite_uid_gid(client, container_id):
     container = client.containers.get(container_id)
+    working_dir = project.working_dir
+
     keys = ("passwd", "group")
     passwd_loc = os.path.join(working_dir, 'passwd')
     group_loc = os.path.join(working_dir, 'group')
@@ -158,22 +255,22 @@ def rewrite_uid_gid(client, container_id, working_dir):
     container_passwd_loc = os.path.join(r"/etc/passwd")
     container_group_loc = os.path.join(r"/etc/group")
 
-    passwd_regex_fed = PASSWD_REGEX.format(UID=argument.uid, GID=argument.gid)
-    group_regex_fed = GROUP_REGEX.format(GID=argument.gid)
+    passwd_regex_fed = PASSWD_REGEX.format(UID=project.uid, GID=project.gid)
+    group_regex_fed = GROUP_REGEX.format(GID=project.gid)
     regex_dict = dict(zip(keys, (passwd_regex_fed, group_regex_fed)))
 
     passwd_fed = PASSWD_FORMAT.format(
-        user=argument.username,
-        uid=argument.uid,
-        gid=argument.gid,
-        home=argument.home,
-        shell=argument.shell)
+        user=project.user,
+        uid=project.uid,
+        gid=project.gid,
+        home=project.home,
+        shell=project.shell)
     group_fed = GROUP_FORMAT.format(
-        group=argument.group,
-        gid=argument.gid)
+        group=project.group,
+        gid=project.gid)
     fed_dict = dict(zip(keys, (passwd_fed, group_fed)))
 
-    username_dict = dict(zip(keys, (argument.username, argument.group)))
+    username_dict = dict(zip(keys, (project.user, project.group)))
 
     def rewrite(result_file):
         result = result_file[0]
@@ -210,40 +307,55 @@ def rewrite_uid_gid(client, container_id, working_dir):
 
 
 @DockerClient
-def create_container(client, image_id, working_dir):
+def create_container(client):
     containerCollection = client.containers
+    image_id = project.image_id
+    working_dir = project.working_dir
+
+    c_name = generate_container_name(image_id)
+    log_path = os.path.join(working_dir, "log")
+    log_container_path = r'/var/log/deployer'
+    src_path = project.src
+    src_container_path = r'/home/shinto/deployer'
+    host_path = os.path.join(working_dir)
+    host_container_path = project.home
+    passwd_path = os.path.join(working_dir, "passwd")
+    passwd_container_path = r'/etc/passwd'
+    group_path = os.path.join(working_dir, "group")
+    group_container_path = r'/etc/group'
 
     environment = {
-        "C_FORCE_ROOT": argument.force_root,
-        "no_proxy": argument.noproxy_host}
+        "C_FORCE_ROOT": project.force_root,
+        "no_proxy": project.noproxy_host}
 
     volumes_bind = {
-        os.path.join(working_dir, "log"): {
-            'bind': r'/var/log/deployer',
+        log_path: {
+            'bind': log_container_path,
             'mode': 'rw'},
-        os.path.join(working_dir, "src"): {
-            'bind': r'/home/shinto/deployer',
+        src_path: {
+            'bind': src_container_path,
             'mode': 'rw'},
-        os.path.join(working_dir): {
-            'bind': r'/home/shinto/host',
+        host_path: {
+            'bind': host_container_path,
             'mode': 'rw'},
-        os.path.join(working_dir, "passwd"): {
-            'bind': r'/etc/passwd',
+        passwd_path: {
+            'bind': passwd_container_path,
             'mode': 'ro'},
-        os.path.join(working_dir, "group"): {
-            'bind': r'/etc/group',
+        group_path: {
+            'bind': group_container_path,
             'mode': 'ro'},
     }
 
     kargs = {
-        "user": "0:0",
+        "user": "0:0",  # run as root
         "environment": environment,
         "volumes": volumes_bind,
-        "privileged": argument.privileged,
+        "privileged": project.privileged,
+        "name": c_name
     }
 
     return containerCollection.create(
-        image=image_id, command=argument.cmd, **kargs)
+        image=image_id, command=project.cmd, **kargs)
 
 
 @DockerClient
@@ -257,7 +369,7 @@ def inspect_file_exist(client, container, loc):
 
 def generate_container_name(image_id):
     return image_id + "_" + \
-        (argument.cname if argument.cname is not None
+        (project.cname if project.cname is not None
          else str(datetime.datetime.now().strftime("%y%b%d%H%M%S")))
 
 
@@ -275,49 +387,49 @@ def create_working_dir():
                 pass
         return make_sub
 
-    if argument.workdir is None:
-        workdir = tempfile.mkdtemp(dir=os.getcwd())
+    if project.working_dir is None:
+        project.working_dir = tempfile.mkdtemp(dir=os.getcwd())
     else:
-        workdir = os.path.join(argument.workdir)
+        project.working_dir = os.path.join(project.working_dir)
 
-    map(create_sub_dir(workdir), SUB_DIRS.values())
-    return workdir
+    map(create_sub_dir(project.working_dir), SUB_DIRS.values())
 
 
 @contextlib.contextmanager
 def start():
-    working_dir = create_working_dir()
-    image_id = get_image_id()
-    container = create_image_container(image_id)
+    create_working_dir()
+    get_image_id()
+    container = create_image_container()
     container_short_id = container.short_id
     check_shell(container_short_id)
 
     try:
-        rewrite_uid_gid(container_short_id, working_dir)
+        rewrite_uid_gid(container_short_id)
     finally:
         container.remove(force=True)
 
-    container = create_container(image_id, working_dir)
+    container = create_container()
     container.start()
 
-    yield container.short_id, working_dir
+    yield container.short_id
 
 
 def run():
     opt_parser()
 
-    with start() as result:
+    with start() as container_id:
         print("Access container: \"docker exec -it {ID} {CMD}\"".format(
-            ID=result[0], CMD="/bin/{SHELL}".format(SHELL=argument.shell)))
+            ID=container_id, CMD="{SHELL}".format(SHELL=project.shell)))
         print("Stop container: \"docker stop {ID}\"".format(
-            ID=result[0]))
+            ID=container_id))
         print("Remove container: \"docker rm {ID}\"".format(
-            ID=result[0]))
+            ID=container_id))
         print("List containers: \"docker ps -a\"")
         print("Stop all containers: \"docker stop $(docker ps -a -q)\"")
         print("Remove all containers: \"docker rm $(docker ps -a -q)\"")
-        print("Log dir: {LOG}".format(LOG=os.path.join(result[1], "log")))
-        print("Src dir: {SRC}".format(SRC=os.path.join(result[1], "src")))
+        print("Log dir: {LOG}".format(
+            LOG=os.path.join(project.working_dir, "log")))
+        print("Src dir: {SRC}".format(SRC=project.src))
 
 
 def opt_parser():
@@ -325,12 +437,18 @@ def opt_parser():
         description='{0} argument parser'.format(sys.argv[0]),
         epilog="Docker container creating script.")
 
-    parser.add_argument('--cmd', metavar='command to run in container.',
+    parser.add_argument('--basesrc', metavar='base_src_directory.',
+                        type=str,
+                        dest='basesrc',
+                        required=True,
+                        help='base src directory.')
+
+    parser.add_argument('--cmd', metavar='command_to_run_in_container.',
                         type=str, default=DEFAULT_CMD,
                         dest='cmd',
                         help='command to run in container.')
 
-    parser.add_argument('--cname', metavar='container name.', type=str,
+    parser.add_argument('--cname', metavar='created_container_name.', type=str,
                         default=None,
                         dest='cname',
                         help='container name')
@@ -340,24 +458,19 @@ def opt_parser():
                         dest='gid',
                         help='GID to run in the container.')
 
-    parser.add_argument('--group', metavar='group name', type=str,
+    parser.add_argument('--group', metavar='group_name', type=str,
                         default=r'deployer',
                         dest='group',
                         help='group in container.')
 
-    parser.add_argument('--home', metavar='home dir', type=str,
-                        default=DEFAULT_HOME['deployer'],
-                        dest='home',
-                        help='home dir in container.')
-
-    parser.add_argument('--image', metavar='docker image id.',
+    parser.add_argument('--image', metavar='image_id.',
                         type=str,
                         dest='image_id',
                         default=None,
                         help='docker image\n'
                              'Default: get from images list regex')
 
-    parser.add_argument('--no_proxy_host', metavar='no proxy host',
+    parser.add_argument('--no_proxy_host', metavar='no_proxy_host',
                         type=str, default=DEFAULT_NO_PROXY_HOSTS,
                         dest='noproxy_host',
                         help='hosts that won\'t go with proxy.')
@@ -367,16 +480,12 @@ def opt_parser():
                         dest='privileged',
                         help='docker run in privileged mode')
 
-    parser.add_argument('--project', metavar='run as in which project.',
-                        type=str, default=Project.deployer.name,
-                        choices=[str(p.name) for p in Project],
+    parser.add_argument('--project', metavar='project_name.',
+                        type=str,
+                        choices=PROJECTS,
                         dest='project',
-                        help='project type')
-
-    parser.add_argument('--proxy', metavar='proxy url',
-                        type=str, default=None,
-                        dest='proxy',
-                        help='proxy url.')
+                        required=True,
+                        help='project name')
 
     parser.add_argument('--root',
                         action='store_true',
@@ -384,16 +493,15 @@ def opt_parser():
                         dest='force_root',
                         help='C_FORCE_ROOT set')
 
-    parser.add_argument('--shell', metavar='default shell.',
-                        type=str, default=Shell.bash.name,
-                        choices=[str(s.name) for s in Shell],
-                        dest='shell',
-                        help='default shell')
+    parser.add_argument('--tag', metavar='image_tag_to_look_for.',
+                        type=str, default="latest",
+                        dest='tag',
+                        help='image tag to look for.')
 
-    parser.add_argument('--user', metavar='user name', type=str,
+    parser.add_argument('--user', metavar='user_name', type=str,
                         default=r'deployer',
                         dest='username',
-                        help='username in container.')
+                        help='user in container.')
 
     parser.add_argument('--uid', metavar='uid', type=int,
                         default=os.getuid(),
@@ -406,8 +514,9 @@ def opt_parser():
                         dest='workdir',
                         help='working directory.')
 
-    global argument
+    global project
     argument = parser.parse_args()
+    project = Project(argument, argument.project)
 
 
 if __name__ == "__main__":
