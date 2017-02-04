@@ -1,7 +1,3 @@
-
-
-createContainer --cname HECK --group ha --user hame --workdir /tmp --basesrc /tmp --project general
-
 # createContainer
 
 ## Prerequisite
