@@ -24,11 +24,11 @@ SRC = (
     "compute-konrad-deployer/deployer",
     "higgs-gateway-appliance-deployer/deployer",
     "compute-rac-db-deployer/deployer",
-    "")
+    None)
 IMAGE_REPOSITORY = (
-    "duh",
-    "duh",
-    "duh",
+    "busybox",
+    "busybox",
+    "busybox",
     "busybox")
 
 SHELL_TYPE = {"bash": r"/bin/bash", "zsh": r"/bin/zsh", "sh": r"/bin/sh"}
@@ -51,15 +51,15 @@ class Project(object):
         self.__project = project
         self.__argument = argument
         self.__image_id = self.__argument.image_id
+        self.__src = None
 
         # check src path exist
-        self.__src = os.path.join(self.basesrc, self.SRC[self.project])
-
-        if not os.path.isdir(self.__src):
-            print("Warning: source path: {0} doesn't exist.".format(
-                self.__src))
-            self.__src = os.path.join(self.working_dir, "src")
-            print("Using {0} as source path.".format(self.__src))
+        if self.SRC[self.project]:
+            self.__src = os.path.join(self.basesrc, self.SRC[self.project])
+            if not os.path.isdir(self.__src):
+                print("Warning: source path: {0} doesn't exist.".format(
+                    self.__src))
+                self.__src = None
 
     @property
     def basesrc(self):
@@ -132,6 +132,8 @@ class Project(object):
 
     @property
     def src(self):
+        if not self.__src:
+            self.__src = os.path.join(self.working_dir, "src")
         return self.__src
 
     @property
