@@ -42,8 +42,8 @@ PASSWD_FORMAT = r"{user}:x:{uid}:{gid}::{home}:{shell}"
 GROUP_FORMAT = r"{group}:x:{gid}:"
 PASSWD_REGEX = r":{UID}:{GID}:"
 GROUP_REGEX = r":{GID}:"
-REPO_BASE_URL = r"http://artifactory-slc.oraclecorp.com/artifactory/opc-delivery-release"
-LOGSTASH_URL = r"dummy.us.oracle.com"
+REPO_BASE_URL = r"http://funny.com/artifactory/opc-delivery-release"
+LOGSTASH_URL = r"dummy.us.funny.com"
 LOGSTASH_PORT = r"4242"
 
 
