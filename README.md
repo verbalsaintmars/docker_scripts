@@ -22,6 +22,7 @@ Those volumes are mounted:
   *higgs_deployer
   *racdb_deployer
   *general
+- --json (required) install_json.json.
 - --cmd Command to run in the created container. [default: tail -f /dev/null]
 - --cname Created container name. [default: imageid_{timestamp}]
 - --gid gid [default: current gid]
