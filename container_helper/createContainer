@@ -1,11 +1,14 @@
-#!/usr/bin/env python
+#!/usr/bin/env python2.7
 import argparse
 import contextlib
 import datetime
 import docker
+import getpass
 import io
+import json
 import os
 import re
+import shutil
 import sys
 import tarfile
 import tempfile
@@ -26,9 +29,9 @@ SRC = (
     "compute-rac-db-deployer/deployer",
     None)
 IMAGE_REPOSITORY = (
-    "busybox",
-    "busybox",
-    "busybox",
+    "compute-deployer_dev_{USER}".format(USER=getpass.getuser()),
+    "compute-deployer_dev_{USER}".format(USER=getpass.getuser()),
+    "compute-deployer_dev_{USER}".format(USER=getpass.getuser()),
     "busybox")
 
 SHELL_TYPE = {"bash": r"/bin/bash", "zsh": r"/bin/zsh", "sh": r"/bin/sh"}
@@ -39,6 +42,9 @@ PASSWD_FORMAT = r"{user}:x:{uid}:{gid}::{home}:{shell}"
 GROUP_FORMAT = r"{group}:x:{gid}:"
 PASSWD_REGEX = r":{UID}:{GID}:"
 GROUP_REGEX = r":{GID}:"
+REPO_BASE_URL = r"http://artifactory-slc.oraclecorp.com/artifactory/opc-delivery-release"
+LOGSTASH_URL = r"dummy.us.oracle.com"
+LOGSTASH_PORT = r"4242"
 
 
 class Project(object):
@@ -109,6 +115,10 @@ class Project(object):
     @property
     def image_tag(self):
         return self.__argument.tag
+
+    @property
+    def install_json(self):
+        return self.__argument.install_json
 
     @property
     def noproxy_host(self):
@@ -396,6 +406,28 @@ def create_working_dir():
 
     map(create_sub_dir(project.working_dir), SUB_DIRS.values())
 
+def touch_repoconfig_json():
+    """Touch repoconfig.json inside the working_dir,
+    which will be mounted as home directory in the container.
+    """
+    repoconfig = {
+        "repository": {"repo_base_url": REPO_BASE_URL},
+        "logstash": {
+            "host": LOGSTASH_URL,
+            "port": LOGSTASH_PORT}}
+
+    repoconfig_json_loc = os.path.join(project.working_dir, "repoconfig.json")
+
+    with open(repoconfig_json_loc, "w") as fd:
+        json.dump(repoconfig, fd)
+
+def cp_install_json():
+    """Copy provided install_json.json into working_dir,
+    which will be mounted as home directory in the container.
+    """
+    install_json_loc = os.path.join(project.working_dir, "install_json.json")
+    shutil.copyfile(project.install_json, install_json_loc)
+
 
 @contextlib.contextmanager
 def start():
@@ -412,6 +444,8 @@ def start():
 
     container = create_container()
     container.start()
+    touch_repoconfig_json()
+    cp_install_json()
 
     yield container.short_id
 
@@ -471,6 +505,12 @@ def opt_parser():
                         default=None,
                         help='docker image\n'
                              'Default: get from images list regex')
+
+    parser.add_argument('--json', metavar='install_json.json',
+                        type=str,
+                        dest='install_json',
+                        required=True,
+                        help='install_json.json location.')
 
     parser.add_argument('--no_proxy_host', metavar='no_proxy_host',
                         type=str, default=DEFAULT_NO_PROXY_HOSTS,
