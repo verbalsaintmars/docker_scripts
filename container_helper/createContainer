@@ -42,8 +42,8 @@ PASSWD_FORMAT = r"{user}:x:{uid}:{gid}::{home}:{shell}"
 GROUP_FORMAT = r"{group}:x:{gid}:"
 PASSWD_REGEX = r":{UID}:{GID}:"
 GROUP_REGEX = r":{GID}:"
-REPO_BASE_URL = r"http://funny.com/artifactory/opc-delivery-release"
-LOGSTASH_URL = r"dummy.us.funny.com"
+REPO_BASE_URL = r"http://artifactory-slc.com/artifactory/opc-delivery-release"
+LOGSTASH_URL = r"dummy.us.com"
 LOGSTASH_PORT = r"4242"
 
 
@@ -53,9 +53,9 @@ class Project(object):
     SRC = dict(zip(PROJECTS, SRC))
     IMAGE_REPOSITORY = dict(zip(PROJECTS, IMAGE_REPOSITORY))
 
-    def __init__(self, argument=None, project=PROJECTS[0]):
-        self.__project = project
+    def __init__(self, argument):
         self.__argument = argument
+        self.__project = self.__argument.project
         self.__image_id = self.__argument.image_id
         self.__src = None
 
@@ -476,7 +476,7 @@ def opt_parser():
     parser.add_argument('--basesrc', metavar='base_src_directory.',
                         type=str,
                         dest='basesrc',
-                        required=True,
+                        default=r"/scratch/shuohuan/working_project",
                         help='base src directory.')
 
     parser.add_argument('--cmd', metavar='command_to_run_in_container.',
@@ -558,7 +558,7 @@ def opt_parser():
 
     global project
     argument = parser.parse_args()
-    project = Project(argument, argument.project)
+    project = Project(argument)
 
 
 if __name__ == "__main__":
